@@ -6,51 +6,42 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { initializeApp, getApps, cert } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
-import { getAuth } from 'firebase-admin/auth';
 import { GoogleGenAI } from '@google/genai';
 import { Pool } from 'pg';
+import crypto from 'crypto';
 
+// Secret key for secure signature generation
+const JWT_SECRET = process.env.JWT_SECRET || 'soberpath-cryptographic-signing-secret-key-32chars';
 
-// Load Firebase configuration
-let projectId = 'gen-lang-client-0743246575';
-let databaseId = 'ai-studio-6254de64-7cdb-4f36-85b2-0881e271c5bc';
-
-try {
-  const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
-  if (fs.existsSync(configPath)) {
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    if (config.projectId) projectId = config.projectId;
-    if (config.firestoreDatabaseId) databaseId = config.firestoreDatabaseId;
-  }
-} catch (err) {
-  console.error("Failed to load firebase-applet-config.json:", err);
+function hashPassword(password: string): string {
+  return crypto.createHmac('sha256', JWT_SECRET).update(password).digest('hex');
 }
 
-// Initialize Firebase Admin SDK
-if (getApps().length === 0) {
-  const serviceAccountVar = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  if (serviceAccountVar) {
-    try {
-      const serviceAccount = JSON.parse(serviceAccountVar);
-      initializeApp({
-        credential: cert(serviceAccount),
-        projectId: projectId
-      });
-      console.log("[Firebase Admin] Initialized successfully with explicit service account credentials from environment.");
-    } catch (err) {
-      console.error("[Firebase Admin] Failed to parse service account JSON, falling back to default configuration:", err);
-      initializeApp({
-        projectId: projectId
-      });
+function generateToken(userId: string, email: string): string {
+  const payload = JSON.stringify({ userId, email, exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }); // 30 days expiry
+  const base64Payload = Buffer.from(payload).toString('base64url');
+  const signature = crypto.createHmac('sha256', JWT_SECRET).update(base64Payload).digest('base64url');
+  return `${base64Payload}.${signature}`;
+}
+
+function verifyToken(token: string): { userId: string, email: string } | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    const [base64Payload, signature] = parts;
+    const expectedSignature = crypto.createHmac('sha256', JWT_SECRET).update(base64Payload).digest('base64url');
+    if (signature !== expectedSignature) return null;
+    
+    const payload = JSON.parse(Buffer.from(base64Payload, 'base64url').toString('utf8'));
+    if (payload.exp < Date.now()) {
+      return null; // Expired
     }
-  } else {
-    initializeApp({
-      projectId: projectId
-    });
+    return { userId: payload.userId, email: payload.email };
+  } catch (err) {
+    return null;
   }
 }
+
 
 // Local persistence fallback (utilize writeable /tmp folder on Vercel to avoid EROFS)
 const LOCAL_DB_PATH = process.env.VERCEL
@@ -877,17 +868,17 @@ async function authenticateToken(req: any, res: any, next: any) {
     }
   }
 
-  try {
-    const decodedToken = await getAuth().verifyIdToken(idToken);
+  const verified = verifyToken(idToken);
+  if (verified) {
     req.user = {
-      uid: decodedToken.uid,
-      email: decodedToken.email,
+      uid: verified.userId,
+      email: verified.email,
     };
-    next();
-  } catch (error) {
-    console.error('Auth Token Verification Failed:', error);
-    return res.status(401).json({ error: 'Unauthorized: Invalid or expired session' });
+    return next();
   }
+
+  console.error('Auth Token Verification Failed');
+  return res.status(401).json({ error: 'Unauthorized: Invalid or expired session' });
 }
 
 // ==========================================
@@ -1500,20 +1491,16 @@ async function seedUserData(uid: string, displayName: string, email: string) {
 }
 
 async function seedTestUsers() {
-  console.log('Seeding test users...');
-  
-  // A. Seed Sandbox Bypass Accounts: profile seeding is commented out so onboarding/privacy notice shows during dev login
-  // await seedUserData('sandbox-uid-test', 'TestHero', 'test@soberpath.com');
-  // await seedUserData('sandbox-uid-recovery', 'SoberJourney', 'recovery@soberpath.com');
-
-  // B. Attempt to Seed Real Firebase Auth users (if enabled/allowed by Firebase config)
+  console.log('Seeding Neon database test users...');
   const testUsers = [
     {
+      uid: 'sandbox-uid-test',
       email: 'test@soberpath.com',
       password: 'password123',
       displayName: 'TestHero',
     },
     {
+      uid: 'sandbox-uid-recovery',
       email: 'recovery@soberpath.com',
       password: 'password123',
       displayName: 'SoberJourney',
@@ -1521,36 +1508,22 @@ async function seedTestUsers() {
   ];
 
   for (const tu of testUsers) {
-    let uid = '';
     try {
-      const userRecord = await getAuth().getUserByEmail(tu.email);
-      uid = userRecord.uid;
-      console.log(`Real Auth user ${tu.email} already exists with uid ${uid}`);
-    } catch (err: any) {
-      if (err.code === 'auth/user-not-found') {
-        try {
-          const createdUser = await getAuth().createUser({
-            email: tu.email,
-            password: tu.password,
-            displayName: tu.displayName,
-            emailVerified: true
-          });
-          uid = createdUser.uid;
-          console.log(`Successfully created real Auth user ${tu.email} with uid ${uid}`);
-        } catch (createErr: any) {
-          console.log(`[Firebase Auth Info] Optional real user creation skipped for ${tu.email}`);
-          continue;
-        }
+      const existing = await pool.query('SELECT uid FROM users WHERE uid = $1 OR email = $2', [tu.uid, tu.email]);
+      if (existing.rows.length === 0) {
+        const hashedPassword = hashPassword(tu.password);
+        await pool.query(
+          `INSERT INTO users (uid, email, password, display_name, created_at, age_confirmed, ai_personalization_enabled, analytics_enabled)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [tu.uid, tu.email, hashedPassword, tu.displayName, new Date().toISOString(), true, true, true]
+        );
+        console.log(`Successfully seeded test user: ${tu.email}`);
       } else {
-        console.log(`[Firebase Auth Info] Optional real user query skipped for ${tu.email}`);
-        continue;
+        console.log(`Test user ${tu.email} already exists.`);
       }
+    } catch (err) {
+      console.error(`Error seeding user ${tu.email}:`, err);
     }
-
-    // Do not seed user profile dynamically so onboarding notice displays on login
-    // if (uid) {
-    //   await seedUserData(uid, tu.displayName, tu.email);
-    // }
   }
 }
 
@@ -1562,16 +1535,12 @@ async function startServer() {
     console.error('Neon Database initialization failed:', err);
   });
 
-  // Seed test users on server boot asynchronously (skip on Vercel to prevent blocking metadata credential checks)
-  if (!process.env.VERCEL) {
-    seedTestUsers().then(() => {
-      console.log('Test users seeded successfully.');
-    }).catch((err) => {
-      console.error('Test user seeding failed:', err);
-    });
-  } else {
-    console.log('Running on Vercel platform: skipping seedTestUsers to prevent blocking metadata credential checks');
-  }
+  // Seed test users on server boot asynchronously
+  seedTestUsers().then(() => {
+    console.log('Test users seeded successfully.');
+  }).catch((err) => {
+    console.error('Test user seeding failed:', err);
+  });
 
   if (process.env.NODE_ENV !== 'production') {
     console.log('Running in Development Mode: Mounting Vite middleware...');

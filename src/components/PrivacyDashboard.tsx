@@ -15,7 +15,6 @@ import {
   ClipboardCheck,
   Power
 } from 'lucide-react';
-import { auth } from '../lib/firebase';
 import PrivacyNotice from './PrivacyNotice';
 import { safeJsonFetch } from '../lib/api';
 
@@ -124,15 +123,7 @@ export default function PrivacyDashboard({ userProfile, onConsentsUpdated, onAcc
         }
       });
 
-      // Delete the Firebase Auth User from client side
-      const currentUser = auth.currentUser;
-      if (currentUser) {
-        await currentUser.delete().catch(async (authErr) => {
-          console.warn("Auth user delete failed directly (requires recent login). Signing out instead:", authErr);
-          await auth.signOut();
-        });
-      }
-
+      // Account data deleted from active PostgreSQL database schemas successfully
       onAccountDeleted();
     } catch (err: any) {
       console.error("Deletion Error:", err);

@@ -4,13 +4,17 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { onAuthStateChanged, User } from 'firebase/auth';
-import { auth } from './lib/firebase';
 import AuthContainer from './components/AuthContainer';
 import PrivacyNotice from './components/PrivacyNotice';
 import Dashboard from './components/Dashboard';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { safeJsonFetch } from './lib/api';
+
+interface LocalUser {
+  uid: string;
+  email: string;
+  displayName?: string;
+}
 
 interface UserProfile {
   uid: string;
@@ -22,39 +26,38 @@ interface UserProfile {
 }
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<LocalUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 1. Listen for Firebase Auth changes
+  // 1. Restore persistent authentication session from local storage on load
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    const restoreSession = async () => {
       setAuthLoading(true);
       setError(null);
-      if (currentUser) {
-        setUser(currentUser);
-        try {
-          const idToken = await currentUser.getIdToken(true);
-          setToken(idToken);
-          // Fetch user profile from Express server
-          await fetchProfile(idToken);
-        } catch (err: any) {
-          console.error("Auth token extraction failed:", err);
-          setError("Session verification failed. Please try logging in again.");
+      try {
+        const storedToken = localStorage.getItem('soberpath_token');
+        const storedUser = localStorage.getItem('soberpath_user');
+        if (storedToken && storedUser) {
+          setToken(storedToken);
+          const parsedUser = JSON.parse(storedUser);
+          setUser(parsedUser);
+          await fetchProfile(storedToken);
+        } else {
+          setUser(null);
+          setToken(null);
+          setProfile(null);
           setAuthLoading(false);
         }
-      } else {
-        setUser(null);
-        setToken(null);
-        setProfile(null);
+      } catch (err: any) {
+        console.error("Session restoration failed:", err);
         setAuthLoading(false);
       }
-    });
-
-    return () => unsubscribe();
+    };
+    restoreSession();
   }, []);
 
   // 2. Fetch User Profile from Server API
@@ -150,11 +153,8 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    try {
-      await auth.signOut();
-    } catch (e) {
-      console.warn("Firebase signout warning:", e);
-    }
+    localStorage.removeItem('soberpath_token');
+    localStorage.removeItem('soberpath_user');
     setUser(null);
     setToken(null);
     setProfile(null);
@@ -188,7 +188,15 @@ export default function App() {
         // STATE A: Unauthenticated Public Gate
         <div className="min-h-screen flex items-center justify-center p-4 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0b0f19] to-[#05070c]">
           <AuthContainer 
-            onAuthSuccess={handleRefreshProfile} 
+            onAuthSuccess={async (sToken, sUser) => {
+              setAuthLoading(true);
+              setError(null);
+              localStorage.setItem('soberpath_token', sToken);
+              localStorage.setItem('soberpath_user', JSON.stringify(sUser));
+              setUser(sUser);
+              setToken(sToken);
+              await fetchProfile(sToken);
+            }} 
             onSandboxLogin={async (type) => {
               setAuthLoading(true);
               setError(null);
@@ -201,7 +209,6 @@ export default function App() {
                   uid: 'sandbox-uid-test',
                   email: 'test@soberpath.com',
                   displayName: 'TestHero',
-                  emailVerified: true,
                 };
               } else if (type === 'recovery') {
                 sToken = 'sandbox-bypass-recovery';
@@ -209,7 +216,6 @@ export default function App() {
                   uid: 'sandbox-uid-recovery',
                   email: 'recovery@soberpath.com',
                   displayName: 'SoberJourney',
-                  emailVerified: true,
                 };
               } else {
                 const emailTrim = type.trim();
@@ -222,9 +228,10 @@ export default function App() {
                   uid,
                   email: emailTrim,
                   displayName,
-                  emailVerified: true,
                 };
               }
+              localStorage.setItem('soberpath_token', sToken);
+              localStorage.setItem('soberpath_user', JSON.stringify(sUser));
               setUser(sUser as any);
               setToken(sToken);
               await fetchProfile(sToken);

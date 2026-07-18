@@ -10,7 +10,6 @@ import UrgeTracker from './UrgeTracker';
 import JournalSection from './JournalSection';
 import AiCoach from './AiCoach';
 import PrivacyDashboard from './PrivacyDashboard';
-import { auth } from '../lib/firebase';
 import { safeJsonFetch } from '../lib/api';
 import { 
   Home, 
@@ -77,12 +76,7 @@ export default function Dashboard({ userProfile, token, onLogout, onRefreshProfi
   }, [token]);
 
   const handleLogoutClick = async () => {
-    try {
-      await auth.signOut();
-      onLogout();
-    } catch (e) {
-      console.error(e);
-    }
+    onLogout();
   };
 
   // Quick action logging clean day

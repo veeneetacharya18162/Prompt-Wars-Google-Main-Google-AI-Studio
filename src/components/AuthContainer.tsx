@@ -4,17 +4,10 @@
  */
 
 import React, { useState } from 'react';
-import { 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
-  sendPasswordResetEmail,
-  sendEmailVerification
-} from 'firebase/auth';
-import { auth } from '../lib/firebase';
 import { ShieldAlert, LogIn, UserPlus, KeyRound, CheckCircle, Sparkles } from 'lucide-react';
 
 interface AuthContainerProps {
-  onAuthSuccess: () => void;
+  onAuthSuccess: (token: string, user: { uid: string, email: string, displayName?: string }) => void;
   onSandboxLogin: (type: string) => void;
 }
 
@@ -41,64 +34,36 @@ export default function AuthContainer({ onAuthSuccess, onSandboxLogin }: AuthCon
 
     try {
       if (isSignUp) {
-        // Sign Up Flow
-        if (password.length < 8) {
-          setError("Password must be at least 8 characters long for robust security.");
-          setLoading(false);
-          return;
+        // Sign Up Flow via custom Neon backend
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: emailTrim, password })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || "Failed to create secure account.");
         }
-
-        try {
-          const userCredential = await createUserWithEmailAndPassword(auth, emailTrim, password);
-          // Securely trigger email verification
-          if (userCredential.user) {
-            await sendEmailVerification(userCredential.user);
-            setMessage("Account created! A verification email has been sent to your inbox. Please verify your email, then log in.");
-            setIsSignUp(false);
-            setPassword('');
-          }
-        } catch (fbErr: any) {
-          if (fbErr.code === 'auth/operation-not-allowed') {
-            console.warn("Firebase Auth disabled. Falling back to Sandbox Bypass Session for", emailTrim);
-            onSandboxLogin(emailTrim);
-            return;
-          }
-          throw fbErr;
-        }
+        setMessage("Account created! Logging you in securely...");
+        setTimeout(() => {
+          onAuthSuccess(data.token, data.user);
+        }, 1200);
       } else {
-        // Sign In Flow
-        try {
-          const userCredential = await signInWithEmailAndPassword(auth, emailTrim, password);
-          if (userCredential.user) {
-            // If the email is not verified, we can let the user know, but they can still log in or we show a mild alert.
-            // In some strict environments, you require email verification. Let's show a helpful indicator without blocking them completely, or require it.
-            // Let's check:
-            if (!userCredential.user.emailVerified) {
-              setMessage("Welcome! Please note: Your email is not verified. Please check your inbox for the verification link to unlock all safety features.");
-            }
-            onAuthSuccess();
-          }
-        } catch (fbErr: any) {
-          if (fbErr.code === 'auth/operation-not-allowed') {
-            console.warn("Firebase Auth disabled. Falling back to Sandbox Bypass Session for", emailTrim);
-            onSandboxLogin(emailTrim);
-            return;
-          }
-          throw fbErr;
+        // Sign In Flow via custom Neon backend
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: emailTrim, password })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || "Invalid email address or password combination.");
         }
+        onAuthSuccess(data.token, data.user);
       }
     } catch (err: any) {
       console.error("Authentication Error:", err);
-      // Account enumeration prevention & generic safe error messages
-      if (err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
-        setError("Invalid email address or password combination. Please try again.");
-      } else if (err.code === 'auth/email-already-in-use') {
-        setError("This email address is already in use. Please sign in or use password reset.");
-      } else if (err.code === 'auth/operation-not-allowed') {
-        setError("Email/Password Authentication is not enabled in the Firebase Console. To fix this, open your Firebase Project Console, navigate to Authentication > Sign-in method, click 'Add new provider', select 'Email/Password', enable it, and save the settings.");
-      } else {
-        setError("Authentication failed. Please check your network connection and try again.");
-      }
+      setError(err.message || "Authentication failed. Please check your network connection and try again.");
     } finally {
       setLoading(false);
     }
@@ -113,17 +78,7 @@ export default function AuthContainer({ onAuthSuccess, onSandboxLogin }: AuthCon
       return;
     }
 
-    setLoading(true);
-    try {
-      await sendPasswordResetEmail(auth, emailTrim);
-      // Prevent enumeration: "If that email is registered..."
-      setMessage("If your email is registered in our database, a secure password reset link has been dispatched to your inbox.");
-    } catch (err: any) {
-      console.error("Password Reset Error:", err);
-      setMessage("If your email is registered in our database, a secure password reset link has been dispatched to your inbox.");
-    } finally {
-      setLoading(false);
-    }
+    setMessage("SoberPath now operates securely on local Neon PostgreSQL database schemas. For password reset assistance, please contact system administration or register a new account.");
   };
 
   return (
