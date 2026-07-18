@@ -11,6 +11,8 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
+import { Pool } from 'pg';
+
 
 // Load Firebase configuration
 let projectId = 'gen-lang-client-0743246575';
@@ -120,37 +122,10 @@ function deleteLocalDoc(docPath: string) {
 }
 
 class SmartFirestore {
-  public useLocal = false;
-  public realDb: any;
+  public pool: Pool;
 
-  constructor(realDb: any) {
-    this.realDb = realDb;
-    if (!realDb) {
-      this.useLocal = true;
-    }
-  }
-
-  private async run<T>(firebaseOp: () => Promise<T>, fallbackOp: () => T): Promise<T> {
-    if (this.useLocal || !this.realDb) {
-      return fallbackOp();
-    }
-    try {
-      return await firebaseOp();
-    } catch (err: any) {
-      const errMsg = err.message || '';
-      if (
-        errMsg.includes('PERMISSION_DENIED') || 
-        errMsg.includes('insufficient permissions') || 
-        err.code === 7 ||
-        errMsg.includes('databaseId') ||
-        errMsg.includes('unauthorized')
-      ) {
-        console.warn('⚠️ FIRESTORE ACCESS FAILED - Activating Local Sandbox Database Fallback! Error:', err);
-        this.useLocal = true;
-        return fallbackOp();
-      }
-      throw err;
-    }
+  constructor(pool: Pool) {
+    this.pool = pool;
   }
 
   collection(name: string) {
@@ -197,49 +172,66 @@ class SmartCollection {
   }
 
   async get() {
-    return this.dbWrapper['run'](
-      async () => {
-        let q = this.dbWrapper.realDb.collection(this.path);
-        for (const c of this.queryConstraints) {
-          if (c.type === 'where') q = q.where(c.field, c.op, c.value);
-          if (c.type === 'orderBy') q = q.orderBy(c.field, c.direction);
-          if (c.type === 'limit') q = q.limit(c.value);
-        }
-        const snap = await q.get();
-        return new SmartQuerySnapshot(
-          snap.docs.map((d: any) => new SmartDocumentSnapshot(this.dbWrapper, d.id, true, d.data(), `${this.path}/${d.id}`))
-        );
-      },
-      () => {
-        let docs = getLocalCollectionDocs(this.path);
-        for (const c of this.queryConstraints) {
-          if (c.type === 'where') {
-            docs = docs.filter(doc => {
-              const val = doc[c.field];
-              if (c.op === '==') return val === c.value;
-              if (c.op === '>=') return val >= c.value;
-              if (c.op === '<=') return val <= c.value;
-              return true;
-            });
-          }
-          if (c.type === 'orderBy') {
-            docs.sort((a, b) => {
-              const valA = a[c.field];
-              const valB = b[c.field];
-              if (valA < valB) return c.direction === 'asc' ? -1 : 1;
-              if (valA > valB) return c.direction === 'asc' ? 1 : -1;
-              return 0;
-            });
-          }
-          if (c.type === 'limit') {
-            docs = docs.slice(0, c.value);
-          }
-        }
-        return new SmartQuerySnapshot(
-          docs.map(d => new SmartDocumentSnapshot(this.dbWrapper, d.id || d.uid || '', true, d, `${this.path}/${d.id || d.uid || ''}`))
-        );
+    const info = parsePath(this.path);
+    let queryText = `SELECT * FROM ${info.table}`;
+    const values: any[] = [];
+    const clauses: string[] = [];
+
+    if (info.userId) {
+      values.push(info.userId);
+      clauses.push(`user_id = $${values.length}`);
+    }
+
+    for (const c of this.queryConstraints) {
+      if (c.type === 'where') {
+        const rowMapped = mapObjToRow(info.table, { [c.field]: null });
+        const fieldName = Object.keys(rowMapped)[0] || c.field;
+        let operator = c.op;
+        if (operator === '==') operator = '=';
+
+        values.push(c.value);
+        clauses.push(`${fieldName} ${operator} $${values.length}`);
       }
-    );
+    }
+
+    if (clauses.length > 0) {
+      queryText += ` WHERE ` + clauses.join(' AND ');
+    }
+
+    const orderByConstraints = this.queryConstraints.filter(c => c.type === 'orderBy');
+    if (orderByConstraints.length > 0) {
+      const orderByClauses = orderByConstraints.map(c => {
+        const rowMapped = mapObjToRow(info.table, { [c.field]: null });
+        const fieldName = Object.keys(rowMapped)[0] || c.field;
+        return `${fieldName} ${c.direction.toUpperCase()}`;
+      });
+      queryText += ` ORDER BY ` + orderByClauses.join(', ');
+    }
+
+    const limitConstraint = this.queryConstraints.find(c => c.type === 'limit');
+    if (limitConstraint) {
+      queryText += ` LIMIT ${limitConstraint.value}`;
+    }
+
+    try {
+      const res = await this.dbWrapper.pool.query(queryText, values);
+      return new SmartQuerySnapshot(
+        res.rows.map(row => {
+          const docId = row.uid || row.id;
+          const data = mapRowToObj(info.table, row);
+          return new SmartDocumentSnapshot(
+            this.dbWrapper,
+            docId,
+            true,
+            data,
+            `${this.path}/${docId}`
+          );
+        })
+      );
+    } catch (err) {
+      console.error(`PostgreSQL collection get() failed on path: ${this.path}`, err);
+      throw err;
+    }
   }
 }
 
@@ -255,59 +247,108 @@ class SmartDoc {
   }
 
   async get() {
-    return this.dbWrapper['run'](
-      async () => {
-        const docRef = this.dbWrapper.realDb.collection(this.path.split('/').slice(0, -1).join('/')).doc(this.id);
-        const snap = await docRef.get();
-        return new SmartDocumentSnapshot(this.dbWrapper, snap.id, snap.exists, snap.data(), this.path);
-      },
-      () => {
-        const data = getLocalDoc(this.path);
-        return new SmartDocumentSnapshot(this.dbWrapper, this.id, !!data, data, this.path);
-      }
-    );
+    const info = parsePath(this.path);
+    const pkCol = info.table === 'users' ? 'uid' : 'id';
+    const queryText = `SELECT * FROM ${info.table} WHERE ${pkCol} = $1`;
+
+    try {
+      const res = await this.dbWrapper.pool.query(queryText, [this.id]);
+      const exists = res.rows.length > 0;
+      const data = exists ? mapRowToObj(info.table, res.rows[0]) : null;
+      return new SmartDocumentSnapshot(this.dbWrapper, this.id, exists, data, this.path);
+    } catch (err) {
+      console.error(`PostgreSQL doc get() failed on path: ${this.path}`, err);
+      throw err;
+    }
   }
 
   async set(data: any) {
-    return this.dbWrapper['run'](
-      async () => {
-        const docRef = this.dbWrapper.realDb.collection(this.path.split('/').slice(0, -1).join('/')).doc(this.id);
-        await docRef.set(data);
-        return data;
-      },
-      () => {
-        setLocalDoc(this.path, data);
-        return data;
+    const info = parsePath(this.path);
+    const pkCol = info.table === 'users' ? 'uid' : 'id';
+    
+    const fullData = { ...data };
+    if (info.table === 'users') {
+      fullData.uid = this.id;
+    } else {
+      fullData.id = this.id;
+      if (info.userId) {
+        fullData.userId = info.userId;
       }
-    );
+    }
+
+    const row = mapObjToRow(info.table, fullData);
+    const columns = Object.keys(row);
+    const values = Object.values(row);
+
+    const colNamesList = columns.join(', ');
+    const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+
+    const updateClauses = columns
+      .filter(col => col !== pkCol)
+      .map(col => `${col} = EXCLUDED.${col}`);
+
+    let queryText = '';
+    if (updateClauses.length > 0) {
+      queryText = `
+        INSERT INTO ${info.table} (${colNamesList})
+        VALUES (${placeholders})
+        ON CONFLICT (${pkCol})
+        DO UPDATE SET ${updateClauses.join(', ')}
+      `;
+    } else {
+      queryText = `
+        INSERT INTO ${info.table} (${colNamesList})
+        VALUES (${placeholders})
+        ON CONFLICT (${pkCol})
+        DO NOTHING
+      `;
+    }
+
+    try {
+      await this.dbWrapper.pool.query(queryText, values);
+      return fullData;
+    } catch (err) {
+      console.error(`PostgreSQL doc set() failed on path: ${this.path}`, err);
+      throw err;
+    }
   }
 
   async update(data: any) {
-    return this.dbWrapper['run'](
-      async () => {
-        const docRef = this.dbWrapper.realDb.collection(this.path.split('/').slice(0, -1).join('/')).doc(this.id);
-        await docRef.update(data);
-        return data;
-      },
-      () => {
-        const current = getLocalDoc(this.path) || {};
-        const updated = { ...current, ...data };
-        setLocalDoc(this.path, updated);
-        return updated;
-      }
-    );
+    const info = parsePath(this.path);
+    const pkCol = info.table === 'users' ? 'uid' : 'id';
+    
+    const row = mapObjToRow(info.table, data);
+    const columns = Object.keys(row).filter(col => col !== pkCol);
+    const values = Object.values(row).filter((_, i) => Object.keys(row)[i] !== pkCol);
+
+    if (columns.length === 0) {
+      return data;
+    }
+
+    const setClauses = columns.map((col, i) => `${col} = $${i + 1}`).join(', ');
+    values.push(this.id);
+    const queryText = `UPDATE ${info.table} SET ${setClauses} WHERE ${pkCol} = $${values.length}`;
+
+    try {
+      await this.dbWrapper.pool.query(queryText, values);
+      return data;
+    } catch (err) {
+      console.error(`PostgreSQL doc update() failed on path: ${this.path}`, err);
+      throw err;
+    }
   }
 
   async delete() {
-    return this.dbWrapper['run'](
-      async () => {
-        const docRef = this.dbWrapper.realDb.collection(this.path.split('/').slice(0, -1).join('/')).doc(this.id);
-        await docRef.delete();
-      },
-      () => {
-        deleteLocalDoc(this.path);
-      }
-    );
+    const info = parsePath(this.path);
+    const pkCol = info.table === 'users' ? 'uid' : 'id';
+    const queryText = `DELETE FROM ${info.table} WHERE ${pkCol} = $1`;
+
+    try {
+      await this.dbWrapper.pool.query(queryText, [this.id]);
+    } catch (err) {
+      console.error(`PostgreSQL doc delete() failed on path: ${this.path}`, err);
+      throw err;
+    }
   }
 }
 
@@ -357,16 +398,182 @@ class SmartBatch {
   }
 }
 
-let rawDb: any;
-try {
-  rawDb = databaseId
-    ? getFirestore(undefined, databaseId)
-    : getFirestore();
-} catch (e) {
-  console.warn("Could not initialize real Firestore, starting in fallback mode:", e);
+function parsePath(path: string) {
+  const parts = path.split('/').filter(Boolean);
+  
+  if (parts.length === 1 && parts[0] === 'users') {
+    return { table: 'users', isCollection: true, userId: undefined, docId: undefined };
+  }
+  if (parts.length === 2 && parts[0] === 'users') {
+    return { table: 'users', isCollection: false, userId: parts[1], docId: parts[1] };
+  }
+  if (parts.length === 3 && parts[0] === 'users') {
+    const table = parts[2] === 'chatHistory' ? 'chat' : parts[2];
+    return { table, isCollection: true, userId: parts[1], docId: undefined };
+  }
+  if (parts.length === 4 && parts[0] === 'users') {
+    const table = parts[2] === 'chatHistory' ? 'chat' : parts[2];
+    return { table, isCollection: false, userId: parts[1], docId: parts[3] };
+  }
+  
+  throw new Error(`Unsupported database path structure: ${path}`);
 }
 
-const db = new SmartFirestore(rawDb);
+function mapRowToObj(table: string, row: any): any {
+  if (!row) return null;
+  const obj: any = {};
+  for (const [key, val] of Object.entries(row)) {
+    let newKey = key;
+    if (key === 'display_name') newKey = 'displayName';
+    if (key === 'created_at') newKey = 'createdAt';
+    if (key === 'age_confirmed') newKey = 'ageConfirmed';
+    if (key === 'ai_personalization_enabled') newKey = 'aiPersonalizationEnabled';
+    if (key === 'analytics_enabled') newKey = 'analyticsEnabled';
+    if (key === 'user_id') newKey = 'userId';
+    if (key === 'habit_id') newKey = 'habitId';
+    if (key === 'last_clean_date') newKey = 'lastCleanDate';
+    if (key === 'consent_category') newKey = 'consentCategory';
+    if (key === 'notice_version') newKey = 'noticeVersion';
+    
+    if (key === 'triggers' && typeof val === 'string') {
+      try {
+        obj[newKey] = JSON.parse(val);
+      } catch {
+        obj[newKey] = [];
+      }
+    } else if (key === 'triggers' && Array.isArray(val)) {
+      obj[newKey] = val;
+    } else {
+      obj[newKey] = val;
+    }
+  }
+  return obj;
+}
+
+function mapObjToRow(table: string, obj: any): Record<string, any> {
+  const row: any = {};
+  for (const [key, val] of Object.entries(obj)) {
+    let newKey = key;
+    if (key === 'displayName') newKey = 'display_name';
+    if (key === 'createdAt') newKey = 'created_at';
+    if (key === 'ageConfirmed') newKey = 'age_confirmed';
+    if (key === 'aiPersonalizationEnabled') newKey = 'ai_personalization_enabled';
+    if (key === 'analyticsEnabled') newKey = 'analytics_enabled';
+    if (key === 'userId') newKey = 'user_id';
+    if (key === 'habitId') newKey = 'habit_id';
+    if (key === 'lastCleanDate') newKey = 'last_clean_date';
+    if (key === 'consentCategory') newKey = 'consent_category';
+    if (key === 'noticeVersion') newKey = 'notice_version';
+
+    if (key === 'triggers' && Array.isArray(val)) {
+      row[newKey] = JSON.stringify(val);
+    } else {
+      row[newKey] = val;
+    }
+  }
+  return row;
+}
+
+const connectionString = process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_BON9CkMox1PJ@ep-odd-credit-aukgpqex-pooler.c-10.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require';
+
+const pool = new Pool({
+  connectionString,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
+
+async function initializeDatabase() {
+  console.log("Initializing Neon PostgreSQL database tables...");
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        uid TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        age_confirmed BOOLEAN NOT NULL DEFAULT TRUE,
+        ai_personalization_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        analytics_enabled BOOLEAN NOT NULL DEFAULT TRUE
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS consents (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        consent_category TEXT NOT NULL,
+        status BOOLEAN NOT NULL,
+        notice_version TEXT NOT NULL,
+        timestamp TEXT NOT NULL
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS habits (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        goal TEXT,
+        triggers JSONB,
+        created_at TEXT NOT NULL,
+        streak INTEGER DEFAULT 0,
+        last_clean_date TEXT
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS entries (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        habit_id TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        type TEXT NOT NULL,
+        intensity INTEGER,
+        notes TEXT,
+        trigger TEXT,
+        mood TEXT
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS journal (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT,
+        content TEXT NOT NULL,
+        mood TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS chat (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        message TEXT NOT NULL,
+        timestamp TEXT NOT NULL
+      );
+    `);
+
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_consents_user_id ON consents(user_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_entries_user_id ON entries(user_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_journal_user_id ON journal(user_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_chat_user_id ON chat(user_id);`);
+
+    console.log("Neon PostgreSQL database tables checked/created successfully.");
+  } catch (err) {
+    console.error("Failed to initialize Neon PostgreSQL database:", err);
+  } finally {
+    client.release();
+  }
+}
+
+const db = new SmartFirestore(pool);
+
 
 // Lazy initialization of Gemini API client
 let aiClient: GoogleGenAI | null = null;
@@ -1347,11 +1554,11 @@ async function seedTestUsers() {
           uid = createdUser.uid;
           console.log(`Successfully created real Auth user ${tu.email} with uid ${uid}`);
         } catch (createErr: any) {
-          console.warn(`Could not create real Auth user ${tu.email} in Firebase Auth (Email/Password provider may be disabled):`, createErr.message);
+          console.log(`[Firebase Auth Info] Optional real user creation skipped for ${tu.email}`);
           continue;
         }
       } else {
-        console.warn(`Error querying real Auth user ${tu.email} (Firebase Auth may be unconfigured):`, err.message);
+        console.log(`[Firebase Auth Info] Optional real user query skipped for ${tu.email}`);
         continue;
       }
     }
@@ -1363,6 +1570,11 @@ async function seedTestUsers() {
 }
 
 async function startServer() {
+  // Initialize Neon database tables
+  await initializeDatabase().catch((err) => {
+    console.error('Neon Database initialization failed:', err);
+  });
+
   // Seed test users on server boot
   await seedTestUsers().catch((err) => {
     console.error('Test user seeding failed:', err);
@@ -1384,11 +1596,17 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`SoberPath Server running on http://0.0.0.0:${PORT}`);
-  });
+  if (!process.env.VERCEL) {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`SoberPath Server running on http://0.0.0.0:${PORT}`);
+    });
+  } else {
+    console.log('Running on Vercel platform, skipping app.listen() to run as Serverless Function');
+  }
 }
 
 startServer().catch((err) => {
   console.error('Server failed to start:', err);
 });
+
+export default app;

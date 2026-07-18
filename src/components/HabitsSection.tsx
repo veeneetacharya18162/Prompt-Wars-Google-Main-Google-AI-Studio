@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { Habit, HabitCategory } from '../types';
 import { Plus, Trash2, ShieldAlert, CheckCircle2, Award, Sparkles, HelpCircle } from 'lucide-react';
+import { safeJsonFetch } from '../lib/api';
 
 interface HabitsSectionProps {
   habits: Habit[];
@@ -53,7 +54,7 @@ export default function HabitsSection({ habits, onHabitAdded, onHabitDeleted, on
       .filter(t => t.length > 0);
 
     try {
-      const res = await fetch('/api/habits', {
+      const data = await safeJsonFetch('/api/habits', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -66,11 +67,6 @@ export default function HabitsSection({ habits, onHabitAdded, onHabitDeleted, on
           triggers: parsedTriggers
         })
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to create habit');
-      }
 
       setSuccess(`Habit "${nameTrim}" registered securely.`);
       setName('');

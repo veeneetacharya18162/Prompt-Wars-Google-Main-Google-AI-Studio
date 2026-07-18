@@ -6,6 +6,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ChatMessage } from '../types';
 import { Sparkles, Send, ShieldAlert, PhoneCall, Trash2, Heart, Lock, Mic, MicOff } from 'lucide-react';
+import { safeJsonFetch } from '../lib/api';
 
 interface AiCoachProps {
   chatHistory: ChatMessage[];
@@ -128,7 +129,7 @@ export default function AiCoach({ chatHistory, onMessageSent, onHistoryCleared, 
     setMessage('');
 
     try {
-      const res = await fetch('/api/chat', {
+      const data = await safeJsonFetch('/api/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -136,11 +137,6 @@ export default function AiCoach({ chatHistory, onMessageSent, onHistoryCleared, 
         },
         body: JSON.stringify({ message: msgTrim })
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to get coach response.');
-      }
 
       onMessageSent();
     } catch (err: any) {

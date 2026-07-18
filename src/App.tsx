@@ -10,6 +10,7 @@ import AuthContainer from './components/AuthContainer';
 import PrivacyNotice from './components/PrivacyNotice';
 import Dashboard from './components/Dashboard';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
+import { safeJsonFetch } from './lib/api';
 
 interface UserProfile {
   uid: string;
@@ -69,7 +70,25 @@ export default function App() {
         // Profile does not exist yet; must trigger onboarding PrivacyNotice
         setProfile(null);
       } else if (!res.ok) {
-        throw new Error("Failed to fetch secure user profile");
+        let errorDetail = "Failed to fetch secure user profile";
+        try {
+          const contentType = res.headers.get("content-type") || "";
+          if (contentType.includes("application/json")) {
+            const errData = await res.json();
+            errorDetail = errData.error || errorDetail;
+          } else {
+            const htmlOrText = await res.text();
+            if (htmlOrText) {
+              if (htmlOrText.includes("The page could not be found") || res.status === 404) {
+                errorDetail = "API Route not found (404). If deploying to Vercel, please make sure serverless functions are configured or verify vercel.json.";
+              } else {
+                const strippedText = htmlOrText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+                errorDetail = `Server response (${res.status}): ${strippedText.substring(0, 100)}`;
+              }
+            }
+          }
+        } catch (e) {}
+        throw new Error(errorDetail);
       } else {
         const data = await res.json();
         setProfile(data);
@@ -97,7 +116,7 @@ export default function App() {
       const emailPrefix = user.email ? user.email.split('@')[0] : 'SoberCompanion';
       const displayName = emailPrefix.charAt(0).toUpperCase() + emailPrefix.slice(1);
 
-      const res = await fetch('/api/user/profile', {
+      const data = await safeJsonFetch('/api/user/profile', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -110,11 +129,6 @@ export default function App() {
           analyticsEnabled: consents.analyticsEnabled
         })
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Profile initialization failed.");
-      }
 
       setProfile(data);
     } catch (err: any) {

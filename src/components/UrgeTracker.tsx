@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { Habit, Entry } from '../types';
 import { ShieldAlert, AlertCircle, Plus, Calendar, Flame, FlameKindling, RefreshCw } from 'lucide-react';
+import { safeJsonFetch } from '../lib/api';
 
 interface UrgeTrackerProps {
   habits: Habit[];
@@ -47,7 +48,7 @@ export default function UrgeTracker({ habits, entries, onEntryLogged, onEntryDel
     setLoading(true);
 
     try {
-      const res = await fetch('/api/entries', {
+      const data = await safeJsonFetch('/api/entries', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -62,11 +63,6 @@ export default function UrgeTracker({ habits, entries, onEntryLogged, onEntryDel
           notes: notes.trim()
         })
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to submit log entry.');
-      }
 
       setSuccess(type === 'relapse' 
         ? "Relapse logged securely. Streak reset to 0. Every relapse is a learning opportunity—be kind to yourself and consult your AI Coach for motivational CBT strategies."

@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { auth } from '../lib/firebase';
 import PrivacyNotice from './PrivacyNotice';
+import { safeJsonFetch } from '../lib/api';
 
 interface PrivacyDashboardProps {
   userProfile: {
@@ -48,7 +49,7 @@ export default function PrivacyDashboard({ userProfile, onConsentsUpdated, onAcc
     setLoading(true);
 
     try {
-      const res = await fetch('/api/user/consent', {
+      const data = await safeJsonFetch('/api/user/consent', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -59,11 +60,6 @@ export default function PrivacyDashboard({ userProfile, onConsentsUpdated, onAcc
           analyticsEnabled: analytics
         })
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to update consents');
-      }
 
       setSuccess("Your personal privacy options and audit trails have been updated successfully.");
       onConsentsUpdated();
@@ -121,17 +117,12 @@ export default function PrivacyDashboard({ userProfile, onConsentsUpdated, onAcc
     setLoading(true);
 
     try {
-      const res = await fetch('/api/user/delete', {
+      const data = await safeJsonFetch('/api/user/delete', {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`
         }
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to complete data deletion.');
-      }
 
       // Delete the Firebase Auth User from client side
       const currentUser = auth.currentUser;

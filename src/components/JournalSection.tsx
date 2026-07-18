@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { Journal } from '../types';
 import { Shield, Feather, Trash2, Calendar, Lock, Mic, MicOff } from 'lucide-react';
+import { safeJsonFetch } from '../lib/api';
 
 interface JournalSectionProps {
   journals: Journal[];
@@ -114,7 +115,7 @@ export default function JournalSection({ journals, onJournalAdded, onJournalDele
     setLoading(true);
 
     try {
-      const res = await fetch('/api/journal', {
+      const data = await safeJsonFetch('/api/journal', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -126,11 +127,6 @@ export default function JournalSection({ journals, onJournalAdded, onJournalDele
           mood: mood.trim()
         })
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to save journal.");
-      }
 
       setSuccess("Your journal entry has been safely encrypted and saved.");
       setTitle('');
