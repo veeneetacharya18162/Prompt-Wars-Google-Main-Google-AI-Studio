@@ -69,6 +69,11 @@ export default function App() {
           'Authorization': `Bearer ${idToken}`
         }
       });
+      if (res.status === 401) {
+        // Stale or invalid session. Logout clean to redirect to login screen.
+        handleLogout();
+        return;
+      }
       if (res.status === 404) {
         // Profile does not exist yet; must trigger onboarding PrivacyNotice
         setProfile(null);

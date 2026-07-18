@@ -506,12 +506,24 @@ async function initializeDatabase() {
       await client.query(`
         CREATE TABLE IF NOT EXISTS users (
           uid TEXT PRIMARY KEY,
+          email TEXT UNIQUE,
+          password TEXT,
           display_name TEXT NOT NULL,
           created_at TEXT NOT NULL,
           age_confirmed BOOLEAN NOT NULL DEFAULT TRUE,
           ai_personalization_enabled BOOLEAN NOT NULL DEFAULT TRUE,
           analytics_enabled BOOLEAN NOT NULL DEFAULT TRUE
         );
+      `);
+
+      // Ensure email and password columns exist in the users table for already-provisioned databases
+      await client.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS password TEXT;
+      `);
+
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
       `);
 
       await client.query(`
@@ -795,7 +807,7 @@ const PORT = 3000;
 
 // Vercel URL Rewrite and Normalization Middleware
 app.use((req, res, next) => {
-  if (req.url) {
+  if (process.env.VERCEL && req.url) {
     const originalUrl = req.url;
     // Normalize path for Vercel Serverless routing: if request goes to Express without /api, prepend /api to match routes
     if (!originalUrl.startsWith('/api/') && originalUrl !== '/api') {
@@ -884,6 +896,83 @@ async function authenticateToken(req: any, res: any, next: any) {
 // ==========================================
 // API ENDPOINTS
 // ==========================================
+
+// 0. AUTHENTICATION (Register & Login)
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  const emailTrim = email.trim().toLowerCase();
+  
+  try {
+    const existing = await pool.query('SELECT uid FROM users WHERE email = $1', [emailTrim]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'An account with this email already exists.' });
+    }
+
+    const uid = 'usr_' + crypto.randomBytes(12).toString('hex');
+    const emailPrefix = emailTrim.split('@')[0] || 'User';
+    const displayName = emailPrefix.charAt(0).toUpperCase() + emailPrefix.slice(1);
+    const hashedPassword = hashPassword(password);
+    const createdAt = new Date().toISOString();
+
+    await pool.query(
+      `INSERT INTO users (uid, email, password, display_name, created_at, age_confirmed, ai_personalization_enabled, analytics_enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [uid, emailTrim, hashedPassword, displayName, createdAt, true, true, true]
+    );
+
+    const token = generateToken(uid, emailTrim);
+    return res.json({
+      token,
+      user: {
+        uid,
+        email: emailTrim,
+        displayName
+      }
+    });
+  } catch (err: any) {
+    console.error('Registration Error:', err);
+    return res.status(500).json({ error: 'Server error during registration. Please try again.' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  const emailTrim = email.trim().toLowerCase();
+  const hashedPassword = hashPassword(password);
+
+  try {
+    const result = await pool.query('SELECT uid, email, password, display_name FROM users WHERE email = $1', [emailTrim]);
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Invalid email address or password combination.' });
+    }
+
+    const dbUser = result.rows[0];
+    if (dbUser.password !== hashedPassword) {
+      return res.status(400).json({ error: 'Invalid email address or password combination.' });
+    }
+
+    const token = generateToken(dbUser.uid, dbUser.email);
+    return res.json({
+      token,
+      user: {
+        uid: dbUser.uid,
+        email: dbUser.email,
+        displayName: dbUser.display_name
+      }
+    });
+  } catch (err: any) {
+    console.error('Login Error:', err);
+    return res.status(500).json({ error: 'Server error during login. Please try again.' });
+  }
+});
 
 // 1. HEALTHCHECK
 app.get('/api/health', (req, res) => {
@@ -1509,9 +1598,9 @@ async function seedTestUsers() {
 
   for (const tu of testUsers) {
     try {
-      const existing = await pool.query('SELECT uid FROM users WHERE uid = $1 OR email = $2', [tu.uid, tu.email]);
+      const existing = await pool.query('SELECT uid, email, password FROM users WHERE uid = $1', [tu.uid]);
+      const hashedPassword = hashPassword(tu.password);
       if (existing.rows.length === 0) {
-        const hashedPassword = hashPassword(tu.password);
         await pool.query(
           `INSERT INTO users (uid, email, password, display_name, created_at, age_confirmed, ai_personalization_enabled, analytics_enabled)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -1519,7 +1608,12 @@ async function seedTestUsers() {
         );
         console.log(`Successfully seeded test user: ${tu.email}`);
       } else {
-        console.log(`Test user ${tu.email} already exists.`);
+        // Unconditionally sync test user password and credentials to ensure they are hashed with the active JWT_SECRET
+        await pool.query(
+          `UPDATE users SET email = $1, password = $2, display_name = $3 WHERE uid = $4`,
+          [tu.email, hashedPassword, tu.displayName, tu.uid]
+        );
+        console.log(`Successfully synced test user configuration for: ${tu.email}`);
       }
     } catch (err) {
       console.error(`Error seeding user ${tu.email}:`, err);
@@ -1529,18 +1623,18 @@ async function seedTestUsers() {
 
 async function startServer() {
   // Initialize Neon database tables asynchronously so it does not block the server boot process
-  initializeDatabase().then(() => {
-    console.log('Neon Database initialized successfully.');
-  }).catch((err) => {
-    console.error('Neon Database initialization failed:', err);
-  });
-
-  // Seed test users on server boot asynchronously
-  seedTestUsers().then(() => {
-    console.log('Test users seeded successfully.');
-  }).catch((err) => {
-    console.error('Test user seeding failed:', err);
-  });
+  initializeDatabase()
+    .then(() => {
+      console.log('Neon Database initialized successfully.');
+      // Seed test users strictly after database is initialized
+      return seedTestUsers();
+    })
+    .then(() => {
+      console.log('Test users seeded successfully.');
+    })
+    .catch((err) => {
+      console.error('Neon Database initialization or seeding failed:', err);
+    });
 
   if (process.env.NODE_ENV !== 'production') {
     console.log('Running in Development Mode: Mounting Vite middleware...');
