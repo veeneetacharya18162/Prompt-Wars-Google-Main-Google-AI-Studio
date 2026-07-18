@@ -6,11 +6,10 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import admin from 'firebase-admin';
+import { initializeApp, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
 import { GoogleGenAI } from '@google/genai';
-import { createServer as createViteServer } from 'vite';
 import { Pool } from 'pg';
 
 
@@ -30,9 +29,11 @@ try {
 }
 
 // Initialize Firebase Admin SDK
-admin.initializeApp({
-  projectId: projectId
-});
+if (getApps().length === 0) {
+  initializeApp({
+    projectId: projectId
+  });
+}
 
 // Local persistence fallback for full resiliency against Firestore Permission/Authorization issues
 const LOCAL_DB_PATH = path.join(process.cwd(), 'local-sandbox-db.json');
@@ -483,106 +484,116 @@ const pool = new Pool({
   }
 });
 
+let dbInitPromise: Promise<void> | null = null;
+
 async function initializeDatabase() {
-  console.log("Initializing Neon PostgreSQL database tables...");
-  const client = await pool.connect();
-  try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        uid TEXT PRIMARY KEY,
-        display_name TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        age_confirmed BOOLEAN NOT NULL DEFAULT TRUE,
-        ai_personalization_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        analytics_enabled BOOLEAN NOT NULL DEFAULT TRUE
-      );
-    `);
+  if (dbInitPromise) return dbInitPromise;
 
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS consents (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        consent_category TEXT NOT NULL,
-        status BOOLEAN NOT NULL,
-        notice_version TEXT NOT NULL,
-        timestamp TEXT NOT NULL
-      );
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS habits (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        category TEXT NOT NULL,
-        goal TEXT,
-        triggers JSONB,
-        created_at TEXT NOT NULL,
-        streak INTEGER DEFAULT 0,
-        last_clean_date TEXT
-      );
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS entries (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        habit_id TEXT NOT NULL,
-        timestamp TEXT NOT NULL,
-        type TEXT NOT NULL,
-        intensity INTEGER,
-        notes TEXT,
-        trigger TEXT,
-        mood TEXT
-      );
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS journal (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        title TEXT,
-        content TEXT NOT NULL,
-        mood TEXT,
-        created_at TEXT NOT NULL
-      );
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS chat (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        sender TEXT NOT NULL,
-        message TEXT NOT NULL,
-        timestamp TEXT NOT NULL
-      );
-    `);
-
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_consents_user_id ON consents(user_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_entries_user_id ON entries(user_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_journal_user_id ON journal(user_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_chat_user_id ON chat(user_id);`);
-
-    // Retroactively clean up pre-seeded dummy data from persistent database tables
+  dbInitPromise = (async () => {
+    console.log("Initializing Neon PostgreSQL database tables...");
+    const client = await pool.connect();
     try {
       await client.query(`
-        DELETE FROM habits WHERE id IN ('habit_vape', 'habit_screen');
-        DELETE FROM entries WHERE id IN ('entry_urge_1', 'entry_relapse_1');
-        DELETE FROM journal WHERE id IN ('journal_1');
-        DELETE FROM chat WHERE id IN ('chat_init_1', 'chat_init_2');
+        CREATE TABLE IF NOT EXISTS users (
+          uid TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          age_confirmed BOOLEAN NOT NULL DEFAULT TRUE,
+          ai_personalization_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          analytics_enabled BOOLEAN NOT NULL DEFAULT TRUE
+        );
       `);
-      console.log("Historical pre-seeded dummy records purged successfully from Neon tables.");
-    } catch (cleanupErr) {
-      console.warn("Could not purge historical dummy data (this is safe to ignore):", cleanupErr);
-    }
 
-    console.log("Neon PostgreSQL database tables checked/created successfully.");
-  } catch (err) {
-    console.error("Failed to initialize Neon PostgreSQL database:", err);
-  } finally {
-    client.release();
-  }
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS consents (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          consent_category TEXT NOT NULL,
+          status BOOLEAN NOT NULL,
+          notice_version TEXT NOT NULL,
+          timestamp TEXT NOT NULL
+        );
+      `);
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS habits (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          category TEXT NOT NULL,
+          goal TEXT,
+          triggers JSONB,
+          created_at TEXT NOT NULL,
+          streak INTEGER DEFAULT 0,
+          last_clean_date TEXT
+        );
+      `);
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS entries (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          habit_id TEXT NOT NULL,
+          timestamp TEXT NOT NULL,
+          type TEXT NOT NULL,
+          intensity INTEGER,
+          notes TEXT,
+          trigger TEXT,
+          mood TEXT
+        );
+      `);
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS journal (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          title TEXT,
+          content TEXT NOT NULL,
+          mood TEXT,
+          created_at TEXT NOT NULL
+        );
+      `);
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS chat (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          sender TEXT NOT NULL,
+          message TEXT NOT NULL,
+          timestamp TEXT NOT NULL
+        );
+      `);
+
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_consents_user_id ON consents(user_id);`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id);`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_entries_user_id ON entries(user_id);`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_journal_user_id ON journal(user_id);`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_chat_user_id ON chat(user_id);`);
+
+      // Retroactively clean up pre-seeded dummy data from persistent database tables
+      try {
+        await client.query(`
+          DELETE FROM habits WHERE id IN ('habit_vape', 'habit_screen');
+          DELETE FROM entries WHERE id IN ('entry_urge_1', 'entry_relapse_1');
+          DELETE FROM journal WHERE id IN ('journal_1');
+          DELETE FROM chat WHERE id IN ('chat_init_1', 'chat_init_2');
+        `);
+        console.log("Historical pre-seeded dummy records purged successfully from Neon tables.");
+      } catch (cleanupErr) {
+        console.warn("Could not purge historical dummy data (this is safe to ignore):", cleanupErr);
+      }
+
+      console.log("Neon PostgreSQL database tables checked/created successfully.");
+    } catch (err) {
+      console.error("Failed to initialize Neon PostgreSQL database:", err);
+      dbInitPromise = null;
+      throw err;
+    } finally {
+      client.release();
+    }
+  })();
+
+  return dbInitPromise;
 }
 
 const db = new SmartFirestore(pool);
@@ -1514,18 +1525,23 @@ async function seedTestUsers() {
 }
 
 async function startServer() {
-  // Initialize Neon database tables
-  await initializeDatabase().catch((err) => {
+  // Initialize Neon database tables asynchronously so it does not block the server boot process
+  initializeDatabase().then(() => {
+    console.log('Neon Database initialized successfully.');
+  }).catch((err) => {
     console.error('Neon Database initialization failed:', err);
   });
 
-  // Seed test users on server boot
-  await seedTestUsers().catch((err) => {
+  // Seed test users on server boot asynchronously
+  seedTestUsers().then(() => {
+    console.log('Test users seeded successfully.');
+  }).catch((err) => {
     console.error('Test user seeding failed:', err);
   });
 
   if (process.env.NODE_ENV !== 'production') {
     console.log('Running in Development Mode: Mounting Vite middleware...');
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
