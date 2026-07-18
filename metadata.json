@@ -1,0 +1,8 @@
+{
+  "name": "SoberPath Habit Recovery",
+  "description": "A secure, privacy-first companion web application helping adults reduce and overcome harmful habits and addictions with personalized GenAI coaching, tracking, journaling, and crisis resources.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

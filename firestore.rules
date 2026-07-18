@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Ultimate Deny-By-Default: All database reads and writes must go through our secure Express backend server API.
+    // Client-side direct access is disabled to prevent any possibility of Broken Object Level Authorization (BOLA),
+    // data harvesting, injection, or direct exposure of personal habit logs.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
