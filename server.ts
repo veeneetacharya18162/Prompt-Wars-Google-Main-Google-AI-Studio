@@ -6,7 +6,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { initializeApp, getApps } from 'firebase-admin/app';
+import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
 import { GoogleGenAI } from '@google/genai';
@@ -30,13 +30,32 @@ try {
 
 // Initialize Firebase Admin SDK
 if (getApps().length === 0) {
-  initializeApp({
-    projectId: projectId
-  });
+  const serviceAccountVar = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (serviceAccountVar) {
+    try {
+      const serviceAccount = JSON.parse(serviceAccountVar);
+      initializeApp({
+        credential: cert(serviceAccount),
+        projectId: projectId
+      });
+      console.log("[Firebase Admin] Initialized successfully with explicit service account credentials from environment.");
+    } catch (err) {
+      console.error("[Firebase Admin] Failed to parse service account JSON, falling back to default configuration:", err);
+      initializeApp({
+        projectId: projectId
+      });
+    }
+  } else {
+    initializeApp({
+      projectId: projectId
+    });
+  }
 }
 
-// Local persistence fallback for full resiliency against Firestore Permission/Authorization issues
-const LOCAL_DB_PATH = path.join(process.cwd(), 'local-sandbox-db.json');
+// Local persistence fallback (utilize writeable /tmp folder on Vercel to avoid EROFS)
+const LOCAL_DB_PATH = process.env.VERCEL
+  ? '/tmp/local-sandbox-db.json'
+  : path.join(process.cwd(), 'local-sandbox-db.json');
 
 let localStore: Record<string, any> = {};
 try {
@@ -1543,12 +1562,16 @@ async function startServer() {
     console.error('Neon Database initialization failed:', err);
   });
 
-  // Seed test users on server boot asynchronously
-  seedTestUsers().then(() => {
-    console.log('Test users seeded successfully.');
-  }).catch((err) => {
-    console.error('Test user seeding failed:', err);
-  });
+  // Seed test users on server boot asynchronously (skip on Vercel to prevent blocking metadata credential checks)
+  if (!process.env.VERCEL) {
+    seedTestUsers().then(() => {
+      console.log('Test users seeded successfully.');
+    }).catch((err) => {
+      console.error('Test user seeding failed:', err);
+    });
+  } else {
+    console.log('Running on Vercel platform: skipping seedTestUsers to prevent blocking metadata credential checks');
+  }
 
   if (process.env.NODE_ENV !== 'production') {
     console.log('Running in Development Mode: Mounting Vite middleware...');
@@ -1558,13 +1581,15 @@ async function startServer() {
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
-    console.log('Running in Production Mode: Serving static client files from dist...');
+  } else if (!process.env.VERCEL) {
+    console.log('Running in Production Mode (Non-Vercel): Serving static client files from dist...');
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
+  } else {
+    console.log('Running in Production Mode (Vercel): Skipping static file routing since Vercel serves the built frontend directly via Edge CDN');
   }
 
   if (!process.env.VERCEL) {
