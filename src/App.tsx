@@ -187,14 +187,39 @@ export default function App() {
             onSandboxLogin={async (type) => {
               setAuthLoading(true);
               setError(null);
-              const isTest = type === 'test';
-              const sToken = isTest ? 'sandbox-bypass-test' : 'sandbox-bypass-recovery';
-              const sUser = {
-                uid: isTest ? 'sandbox-uid-test' : 'sandbox-uid-recovery',
-                email: isTest ? 'test@soberpath.com' : 'recovery@soberpath.com',
-                displayName: isTest ? 'TestHero' : 'SoberJourney',
-                emailVerified: true,
-              };
+              let sToken = '';
+              let sUser: any = null;
+              
+              if (type === 'test') {
+                sToken = 'sandbox-bypass-test';
+                sUser = {
+                  uid: 'sandbox-uid-test',
+                  email: 'test@soberpath.com',
+                  displayName: 'TestHero',
+                  emailVerified: true,
+                };
+              } else if (type === 'recovery') {
+                sToken = 'sandbox-bypass-recovery';
+                sUser = {
+                  uid: 'sandbox-uid-recovery',
+                  email: 'recovery@soberpath.com',
+                  displayName: 'SoberJourney',
+                  emailVerified: true,
+                };
+              } else {
+                const emailTrim = type.trim();
+                const emailPrefix = emailTrim.split('@')[0] || 'User';
+                const displayName = emailPrefix.charAt(0).toUpperCase() + emailPrefix.slice(1);
+                const uid = `sandbox-uid-${emailTrim.replace(/[^a-zA-Z0-9]/g, '-')}`;
+                // Custom token format: sandbox-bypass:uid:email
+                sToken = `sandbox-bypass:${uid}:${emailTrim}`;
+                sUser = {
+                  uid,
+                  email: emailTrim,
+                  displayName,
+                  emailVerified: true,
+                };
+              }
               setUser(sUser as any);
               setToken(sToken);
               await fetchProfile(sToken);

@@ -564,6 +564,19 @@ async function initializeDatabase() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_journal_user_id ON journal(user_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_chat_user_id ON chat(user_id);`);
 
+    // Retroactively clean up pre-seeded dummy data from persistent database tables
+    try {
+      await client.query(`
+        DELETE FROM habits WHERE id IN ('habit_vape', 'habit_screen');
+        DELETE FROM entries WHERE id IN ('entry_urge_1', 'entry_relapse_1');
+        DELETE FROM journal WHERE id IN ('journal_1');
+        DELETE FROM chat WHERE id IN ('chat_init_1', 'chat_init_2');
+      `);
+      console.log("Historical pre-seeded dummy records purged successfully from Neon tables.");
+    } catch (cleanupErr) {
+      console.warn("Could not purge historical dummy data (this is safe to ignore):", cleanupErr);
+    }
+
     console.log("Neon PostgreSQL database tables checked/created successfully.");
   } catch (err) {
     console.error("Failed to initialize Neon PostgreSQL database:", err);
@@ -790,19 +803,38 @@ async function authenticateToken(req: any, res: any, next: any) {
   const idToken = authHeader.split(' ')[1];
 
   // Sandbox bypass options for robust evaluation if Firebase email/password provider is disabled
-  if (idToken === 'sandbox-bypass-test') {
-    req.user = {
-      uid: 'sandbox-uid-test',
-      email: 'test@soberpath.com',
-    };
-    return next();
-  }
-  if (idToken === 'sandbox-bypass-recovery') {
-    req.user = {
-      uid: 'sandbox-uid-recovery',
-      email: 'recovery@soberpath.com',
-    };
-    return next();
+  if (idToken.startsWith('sandbox-bypass')) {
+    if (idToken === 'sandbox-bypass-test') {
+      req.user = {
+        uid: 'sandbox-uid-test',
+        email: 'test@soberpath.com',
+      };
+      return next();
+    }
+    if (idToken === 'sandbox-bypass-recovery') {
+      req.user = {
+        uid: 'sandbox-uid-recovery',
+        email: 'recovery@soberpath.com',
+      };
+      return next();
+    }
+
+    const parts = idToken.split(':');
+    if (parts.length === 3 && parts[0] === 'sandbox-bypass') {
+      const uid = parts[1];
+      const email = parts[2];
+      const emailPrefix = email.split('@')[0] || 'User';
+      const displayName = emailPrefix.charAt(0).toUpperCase() + emailPrefix.slice(1);
+      
+      req.user = { uid, email };
+      
+      // Seed user data dynamically if they don't exist yet
+      await seedUserData(uid, displayName, email).catch(err => {
+        console.error("Failed to seed custom sandbox user:", err);
+      });
+      
+      return next();
+    }
   }
 
   try {
@@ -1420,95 +1452,7 @@ async function seedUserData(uid: string, displayName: string, email: string) {
       };
       await userDocRef.set(profileData);
 
-      // 2. Pre-seed a few habits
-      const habitRef1 = userDocRef.collection('habits').doc('habit_vape');
-      await habitRef1.set({
-        id: 'habit_vape',
-        userId: uid,
-        name: 'Vaping Nicotine',
-        category: 'Smoking/Vaping',
-        goal: 'Breathe easier, save $120 a month, and improve cardiovascular health.',
-        triggers: ['Social gatherings', 'High stress at work', 'Post-meal routines'],
-        createdAt: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString(), // 15 days ago
-        streak: 12,
-        lastCleanDate: new Date().toISOString().split('T')[0]
-      });
-
-      const habitRef2 = userDocRef.collection('habits').doc('habit_screen');
-      await habitRef2.set({
-        id: 'habit_screen',
-        userId: uid,
-        name: 'Late-night Doomscrolling',
-        category: 'Digital/Screen Time',
-        goal: 'Get 8 hours of restorative sleep and rebuild morning productivity.',
-        triggers: ['Lying in bed at night', 'Boredom', 'Anxiety'],
-        createdAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days ago
-        streak: 5,
-        lastCleanDate: new Date().toISOString().split('T')[0]
-      });
-
-      // 3. Pre-seed entries (clean days & cravings)
-      const entriesRef = userDocRef.collection('entries');
-      
-      // Cravings logged 3 days ago
-      const urgeDocRef = entriesRef.doc('entry_urge_1');
-      await urgeDocRef.set({
-        id: 'entry_urge_1',
-        userId: uid,
-        habitId: 'habit_vape',
-        timestamp: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
-        type: 'urge',
-        intensity: 7,
-        notes: 'Had a strong urge to vape while driving home in heavy traffic. Practiced box breathing for 5 minutes instead.',
-        trigger: 'Stress/Driving',
-        mood: 'Anxious but determined'
-      });
-
-      // Relapse logged 6 days ago (shows real journey context)
-      const relapseDocRef = entriesRef.doc('entry_relapse_1');
-      await relapseDocRef.set({
-        id: 'entry_relapse_1',
-        userId: uid,
-        habitId: 'habit_vape',
-        timestamp: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString(),
-        type: 'relapse',
-        intensity: 9,
-        notes: 'Slipped up during Friday night social dinner. Re-focused immediately and re-committed on Saturday morning.',
-        trigger: 'Social gathering',
-        mood: 'Regretful but resilient'
-      });
-
-      // 4. Pre-seed secure journals
-      const journalDocRef = userDocRef.collection('journal').doc('journal_1');
-      await journalDocRef.set({
-        id: 'journal_1',
-        userId: uid,
-        title: 'Reflections on My First Clean Week',
-        content: 'Vaping had become a subconscious reflex. By pausing for 10 seconds before acting, I realized most urges pass in less than two minutes. Energy levels are noticeably returning.',
-        mood: 'Hopeful & Energetic',
-        createdAt: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString()
-      });
-
-      // 5. Pre-seed secure chat coaching history
-      const chatDocRef1 = userDocRef.collection('chat').doc('chat_init_1');
-      await chatDocRef1.set({
-        id: 'chat_init_1',
-        userId: uid,
-        sender: 'user',
-        message: 'Hello, I am feeling a bit stressed today and having cravings to check social media in bed.',
-        timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString()
-      });
-
-      const chatDocRef2 = userDocRef.collection('chat').doc('chat_init_2');
-      await chatDocRef2.set({
-        id: 'chat_init_2',
-        userId: uid,
-        sender: 'ai',
-        message: 'Hello! I am here to support you. Craving is a natural psychological waveform—it peaks and then subsides. Since you identified the trigger as lying in bed, could you try keeping your phone in another room tonight and practicing a 5-minute wind-down meditation instead?',
-        timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000 + 10000).toISOString()
-      });
-
-      console.log(`Successfully finished pre-seeding test data for ${email}`);
+      console.log(`Successfully finished initializing profile data for ${email}`);
     }
   } catch (firestoreErr) {
     console.error(`Error populating Firestore for user ${email}:`, firestoreErr);

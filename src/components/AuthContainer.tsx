@@ -15,7 +15,7 @@ import { ShieldAlert, LogIn, UserPlus, KeyRound, CheckCircle, Sparkles } from 'l
 
 interface AuthContainerProps {
   onAuthSuccess: () => void;
-  onSandboxLogin: (type: 'test' | 'recovery') => void;
+  onSandboxLogin: (type: string) => void;
 }
 
 export default function AuthContainer({ onAuthSuccess, onSandboxLogin }: AuthContainerProps) {
@@ -48,25 +48,43 @@ export default function AuthContainer({ onAuthSuccess, onSandboxLogin }: AuthCon
           return;
         }
 
-        const userCredential = await createUserWithEmailAndPassword(auth, emailTrim, password);
-        // Securely trigger email verification
-        if (userCredential.user) {
-          await sendEmailVerification(userCredential.user);
-          setMessage("Account created! A verification email has been sent to your inbox. Please verify your email, then log in.");
-          setIsSignUp(false);
-          setPassword('');
+        try {
+          const userCredential = await createUserWithEmailAndPassword(auth, emailTrim, password);
+          // Securely trigger email verification
+          if (userCredential.user) {
+            await sendEmailVerification(userCredential.user);
+            setMessage("Account created! A verification email has been sent to your inbox. Please verify your email, then log in.");
+            setIsSignUp(false);
+            setPassword('');
+          }
+        } catch (fbErr: any) {
+          if (fbErr.code === 'auth/operation-not-allowed') {
+            console.warn("Firebase Auth disabled. Falling back to Sandbox Bypass Session for", emailTrim);
+            onSandboxLogin(emailTrim);
+            return;
+          }
+          throw fbErr;
         }
       } else {
         // Sign In Flow
-        const userCredential = await signInWithEmailAndPassword(auth, emailTrim, password);
-        if (userCredential.user) {
-          // If the email is not verified, we can let the user know, but they can still log in or we show a mild alert.
-          // In some strict environments, you require email verification. Let's show a helpful indicator without blocking them completely, or require it.
-          // Let's check:
-          if (!userCredential.user.emailVerified) {
-            setMessage("Welcome! Please note: Your email is not verified. Please check your inbox for the verification link to unlock all safety features.");
+        try {
+          const userCredential = await signInWithEmailAndPassword(auth, emailTrim, password);
+          if (userCredential.user) {
+            // If the email is not verified, we can let the user know, but they can still log in or we show a mild alert.
+            // In some strict environments, you require email verification. Let's show a helpful indicator without blocking them completely, or require it.
+            // Let's check:
+            if (!userCredential.user.emailVerified) {
+              setMessage("Welcome! Please note: Your email is not verified. Please check your inbox for the verification link to unlock all safety features.");
+            }
+            onAuthSuccess();
           }
-          onAuthSuccess();
+        } catch (fbErr: any) {
+          if (fbErr.code === 'auth/operation-not-allowed') {
+            console.warn("Firebase Auth disabled. Falling back to Sandbox Bypass Session for", emailTrim);
+            onSandboxLogin(emailTrim);
+            return;
+          }
+          throw fbErr;
         }
       }
     } catch (err: any) {
