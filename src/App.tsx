@@ -90,6 +90,11 @@ export default function App() {
         } catch (e) {}
         throw new Error(errorDetail);
       } else {
+        const contentType = res.headers.get("content-type") || "";
+        if (!contentType.includes("application/json")) {
+          const bodyText = await res.text();
+          throw new Error(`Expected JSON response but received plain text/HTML: ${bodyText.substring(0, 100)}`);
+        }
         const data = await res.json();
         setProfile(data);
       }

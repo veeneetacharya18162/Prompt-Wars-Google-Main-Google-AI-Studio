@@ -834,16 +834,10 @@ async function authenticateToken(req: any, res: any, next: any) {
     if (parts.length === 3 && parts[0] === 'sandbox-bypass') {
       const uid = parts[1];
       const email = parts[2];
-      const emailPrefix = email.split('@')[0] || 'User';
-      const displayName = emailPrefix.charAt(0).toUpperCase() + emailPrefix.slice(1);
       
       req.user = { uid, email };
       
-      // Seed user data dynamically if they don't exist yet
-      await seedUserData(uid, displayName, email).catch(err => {
-        console.error("Failed to seed custom sandbox user:", err);
-      });
-      
+      // Do not auto-seed profile here so GET /api/user/profile returns 404 and displays onboarding privacy notice
       return next();
     }
   }
@@ -1473,9 +1467,9 @@ async function seedUserData(uid: string, displayName: string, email: string) {
 async function seedTestUsers() {
   console.log('Seeding test users...');
   
-  // A. Seed Sandbox Bypass Accounts (100% resilient to Firebase Auth configuration)
-  await seedUserData('sandbox-uid-test', 'TestHero', 'test@soberpath.com');
-  await seedUserData('sandbox-uid-recovery', 'SoberJourney', 'recovery@soberpath.com');
+  // A. Seed Sandbox Bypass Accounts: profile seeding is commented out so onboarding/privacy notice shows during dev login
+  // await seedUserData('sandbox-uid-test', 'TestHero', 'test@soberpath.com');
+  // await seedUserData('sandbox-uid-recovery', 'SoberJourney', 'recovery@soberpath.com');
 
   // B. Attempt to Seed Real Firebase Auth users (if enabled/allowed by Firebase config)
   const testUsers = [
@@ -1518,9 +1512,10 @@ async function seedTestUsers() {
       }
     }
 
-    if (uid) {
-      await seedUserData(uid, tu.displayName, tu.email);
-    }
+    // Do not seed user profile dynamically so onboarding notice displays on login
+    // if (uid) {
+    //   await seedUserData(uid, tu.displayName, tu.email);
+    // }
   }
 }
 

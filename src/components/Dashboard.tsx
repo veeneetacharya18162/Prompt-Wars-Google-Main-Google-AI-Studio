@@ -11,6 +11,7 @@ import JournalSection from './JournalSection';
 import AiCoach from './AiCoach';
 import PrivacyDashboard from './PrivacyDashboard';
 import { auth } from '../lib/firebase';
+import { safeJsonFetch } from '../lib/api';
 import { 
   Home, 
   Activity, 
@@ -52,22 +53,11 @@ export default function Dashboard({ userProfile, token, onLogout, onRefreshProfi
     try {
       const headers = { 'Authorization': `Bearer ${token}` };
       
-      const [habitsRes, entriesRes, journalsRes, chatRes] = await Promise.all([
-        fetch('/api/habits', { headers }),
-        fetch('/api/entries', { headers }),
-        fetch('/api/journal', { headers }),
-        fetch('/api/chat', { headers })
-      ]);
-
-      if (!habitsRes.ok || !entriesRes.ok || !journalsRes.ok || !chatRes.ok) {
-        throw new Error("Failed to load active recovery logs.");
-      }
-
       const [habitsData, entriesData, journalsData, chatData] = await Promise.all([
-        habitsRes.json(),
-        entriesRes.json(),
-        journalsRes.json(),
-        chatRes.json()
+        safeJsonFetch('/api/habits', { headers }),
+        safeJsonFetch('/api/entries', { headers }),
+        safeJsonFetch('/api/journal', { headers }),
+        safeJsonFetch('/api/chat', { headers })
       ]);
 
       setHabits(habitsData);
@@ -99,7 +89,7 @@ export default function Dashboard({ userProfile, token, onLogout, onRefreshProfi
   const handleLogCleanDay = async (habitId: string) => {
     setGlobalError(null);
     try {
-      const res = await fetch('/api/entries', {
+      await safeJsonFetch('/api/entries', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -110,10 +100,6 @@ export default function Dashboard({ userProfile, token, onLogout, onRefreshProfi
           type: 'clean_day'
         })
       });
-      if (!res.ok) {
-        const d = await res.json();
-        throw new Error(d.error || 'Failed to log clean day');
-      }
       // Re-fetch all data to synchronize streaks and entries cleanly
       await fetchDashboardData();
     } catch (e: any) {
