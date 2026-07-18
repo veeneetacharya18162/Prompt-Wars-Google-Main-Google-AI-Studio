@@ -783,6 +783,22 @@ How are you feeling right now, and what harmful habit or trigger can we focus on
 const app = express();
 const PORT = 3000;
 
+// Vercel URL Rewrite and Normalization Middleware
+app.use((req, res, next) => {
+  if (req.url) {
+    const originalUrl = req.url;
+    // Normalize path for Vercel Serverless routing: if request goes to Express without /api, prepend /api to match routes
+    if (!originalUrl.startsWith('/api/') && originalUrl !== '/api') {
+      const isStaticOrHealth = originalUrl.startsWith('/assets/') || originalUrl === '/favicon.ico' || originalUrl === '/index.html' || originalUrl === '/';
+      if (!isStaticOrHealth) {
+        req.url = '/api' + (originalUrl.startsWith('/') ? '' : '/') + originalUrl;
+        console.log(`[Vercel Route Normalizer] Rewrote ${originalUrl} -> ${req.url}`);
+      }
+    }
+  }
+  next();
+});
+
 // Body parser with payload limit (data minimization and abuse prevention)
 app.use(express.json({ limit: '10kb' }));
 
